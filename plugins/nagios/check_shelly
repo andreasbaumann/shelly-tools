@@ -1,0 +1,400 @@
+#!/bin/bash
+#
+# check_shelly - Nagios/Icinga plugin for Shelly Gen2+ RPC devices
+#                (developed against a Shelly Power Strip Gen4, S4PL-00416EU)
+#
+# --power    Per-socket power draw (apower, W) and current (A) via
+#            Switch.GetStatus. Warns/criticals when draw exceeds a
+#            configurable wattage -- useful for catching an overloaded
+#            socket or an appliance stuck drawing far more than normal.
+#            Every requested socket is reported, on or off, so the
+#            perfdata trend is continuous even while a socket is idle.
+#            Also honours --expect-on/--expect-off (see --state below)
+#            for whichever sockets are in scope for this mode (--socket,
+#            default: all) -- e.g. assert socket 3 draws <1800W AND is on.
+#
+# --voltage  Per-socket mains voltage. Nominal EU mains is 230V; default
+#            thresholds flag a brown-out or surge at roughly +/-5%/+/-10%
+#            (warn 218-242V / crit 207-253V) -- override with --warn-low
+#            et al. if local grid tolerances differ. Also honours
+#            --expect-on/--expect-off like --power does.
+#
+# --wifi     Wi-Fi signal strength (RSSI, dBm) via Shelly.GetStatus.
+#            Also goes CRITICAL if wifi.status isn't "got ip" (device
+#            not actually on the network, independent of signal quality).
+#
+# --health   Device-level housekeeping: sys.restart_required, a pending
+#            firmware update (sys.available_updates non-empty), and how
+#            long it's been since the last successful time sync
+#            (sys.last_sync_ts) -- a device that can't reach NTP drifts,
+#            and its aenergy/by_minute timestamps become unreliable.
+#
+# --state    Asserts specific sockets are on and/or specific sockets are
+#            off (e.g. a server/NAS socket that must never be off, or a
+#            socket that must stay off for safety). Severity is settable
+#            per list: --expect-on/--expect-off escalate to CRITICAL,
+#            --expect-on-warn/--expect-off-warn only to WARNING -- there's
+#            no single right answer for which direction (on-when-should-
+#            be-off vs. off-when-should-be-on) matters more, it depends
+#            what's plugged into the socket, so it's a choice per socket
+#            rather than a fixed rule. Unlisted sockets are not checked.
+#            All four lists also work with --power/--voltage (folded
+#            into that mode's own result), so a single check can assert
+#            both a threshold and a state, e.g. "socket 3 must be on and
+#            draw under 1800W".
+#
+# All modes authenticate with HTTP Digest (SHA-256), which is what
+# Shelly Gen2/3/4 devices require once a device password is set. RPC
+# reference: https://shelly-api-docs.shelly.cloud/gen2/
+#
+# Copyright (C) 2026  Andreas Baumann <mail@andreasbaumann.cc>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+set -euo pipefail
+
+PROGNAME="check_shelly"
+VERSION="1.0.0"
+
+OK=0; WARNING=1; CRITICAL=2; UNKNOWN=3
+
+MODE=""
+HOST=""
+USERNAME="admin"
+PASSWORD=""
+PWDFILE=""
+SOCKETS="all"
+TIMEOUT=10
+
+POWER_WARN=""
+POWER_CRIT=""
+
+VOLT_WARN_LOW=218
+VOLT_CRIT_LOW=207
+VOLT_WARN_HIGH=242
+VOLT_CRIT_HIGH=253
+
+RSSI_WARN=-70
+RSSI_CRIT=-80
+
+SYNC_WARN=86400
+SYNC_CRIT=604800
+
+EXPECT_ON_CRIT=""
+EXPECT_ON_WARN=""
+EXPECT_OFF_CRIT=""
+EXPECT_OFF_WARN=""
+
+print_usage() {
+	echo "Usage: $PROGNAME --host=HOST --mode=power|voltage|wifi|health|state [options]"
+}
+
+print_help() {
+	echo "$PROGNAME $VERSION"
+	echo ""
+	print_usage
+	echo ""
+	echo "  --host=HOST            device hostname or IP (required)"
+	echo "  --user=USER            RPC username (default: admin)"
+	echo "  --password=PASS        RPC password"
+	echo "  --pwdfile=FILE         read 'user/password' from FILE instead of --user/--password"
+	echo "  --socket=0-3|all       socket(s) for --power/--voltage (default: all)"
+	echo "  --timeout=SECS         curl timeout in seconds (default: 10)"
+	echo ""
+	echo "  --mode=power"
+	echo "    --warn=WATT --crit=WATT              per-socket power thresholds"
+	echo ""
+	echo "  --mode=voltage"
+	echo "    --warn-low/--crit-low/--warn-high/--crit-high=VOLT"
+	echo "                                          (defaults: 218/207/242/253)"
+	echo ""
+	echo "  --mode=wifi"
+	echo "    --warn=DBM --crit=DBM                RSSI thresholds (defaults: -70/-80)"
+	echo ""
+	echo "  --mode=health"
+	echo "    --sync-warn=SECS --sync-crit=SECS     max age of last clock sync"
+	echo "                                          (defaults: 86400/604800)"
+	echo ""
+	echo "  --mode=state"
+	echo "    --expect-on=0,3          CRITICAL if any of these sockets is off"
+	echo "    --expect-off=1,2        CRITICAL if any of these sockets is on"
+	echo "    --expect-on-warn=LIST    like --expect-on, but WARNING instead of CRITICAL"
+	echo "    --expect-off-warn=LIST   like --expect-off, but WARNING instead of CRITICAL"
+	echo "                        (at least one of the above is required; severity is"
+	echo "                        per socket/list, so e.g. a NAS socket can be CRITICAL"
+	echo "                        if off while a decorative-light socket is only WARNING"
+	echo "                        if left on)"
+	exit $OK
+}
+
+while test $# -gt 0; do
+	case "$1" in
+		--help|-h) print_help ;;
+		--version|-V) echo "$PROGNAME $VERSION"; exit $OK ;;
+		--mode=*) MODE="${1#--mode=}" ;;
+		--host=*) HOST="${1#--host=}" ;;
+		--user=*) USERNAME="${1#--user=}" ;;
+		--password=*) PASSWORD="${1#--password=}" ;;
+		--pwdfile=*) PWDFILE="${1#--pwdfile=}" ;;
+		--socket=*) SOCKETS="${1#--socket=}" ;;
+		--timeout=*) TIMEOUT="${1#--timeout=}" ;;
+		--warn=*) POWER_WARN="${1#--warn=}"; RSSI_WARN="${1#--warn=}" ;;
+		--crit=*) POWER_CRIT="${1#--crit=}"; RSSI_CRIT="${1#--crit=}" ;;
+		--warn-low=*) VOLT_WARN_LOW="${1#--warn-low=}" ;;
+		--crit-low=*) VOLT_CRIT_LOW="${1#--crit-low=}" ;;
+		--warn-high=*) VOLT_WARN_HIGH="${1#--warn-high=}" ;;
+		--crit-high=*) VOLT_CRIT_HIGH="${1#--crit-high=}" ;;
+		--sync-warn=*) SYNC_WARN="${1#--sync-warn=}" ;;
+		--sync-crit=*) SYNC_CRIT="${1#--sync-crit=}" ;;
+		--expect-on=*) EXPECT_ON_CRIT="${1#--expect-on=}" ;;
+		--expect-off=*) EXPECT_OFF_CRIT="${1#--expect-off=}" ;;
+		--expect-on-warn=*) EXPECT_ON_WARN="${1#--expect-on-warn=}" ;;
+		--expect-off-warn=*) EXPECT_OFF_WARN="${1#--expect-off-warn=}" ;;
+		*)
+			print_usage 1>&2
+			exit $UNKNOWN
+			;;
+	esac
+	shift
+done
+
+if test -z "$HOST"; then
+	echo "UNKNOWN - --host is required"
+	exit $UNKNOWN
+fi
+
+if test -n "$PWDFILE"; then
+	if test ! -r "$PWDFILE"; then
+		echo "UNKNOWN - cannot read pwdfile $PWDFILE"
+		exit $UNKNOWN
+	fi
+	creds=$(head -n1 "$PWDFILE")
+	USERNAME="${creds%%/*}"
+	PASSWORD="${creds#*/}"
+fi
+
+if test -z "$MODE"; then
+	print_usage 1>&2
+	exit $UNKNOWN
+fi
+
+rpc() {
+	curl -sf -m "$TIMEOUT" --digest -u "${USERNAME}:${PASSWORD}" "http://${HOST}$1"
+}
+
+socket_ids() {
+	if test "$SOCKETS" = "all"; then
+		echo "0 1 2 3"
+	else
+		echo "$SOCKETS" | tr ',' ' '
+	fi
+}
+
+csv_list() {
+	echo "$1" | tr ',' ' '
+}
+
+worse() {
+	if test "$1" -ge "$2"; then echo "$1"; else echo "$2"; fi
+}
+
+# Checks socket $1 (given its already-fetched .output as $2) against
+# --expect-on[-warn]/--expect-off[-warn], if the socket is named in any
+# of those lists. Prints "" (not covered), "ok", "CRIT", or "WARN" and
+# may be used from any per-socket mode, not just --mode=state. The
+# four lists are checked in CRIT-before-WARN order; a socket listed in
+# more than one takes the first (most severe) match.
+check_expect() {
+	local id="$1" output="$2" want
+	for want in $(csv_list "$EXPECT_ON_CRIT"); do
+		if test "$want" = "$id"; then
+			test "$output" = "true" && echo "ok" || echo "CRIT"
+			return
+		fi
+	done
+	for want in $(csv_list "$EXPECT_OFF_CRIT"); do
+		if test "$want" = "$id"; then
+			test "$output" = "false" && echo "ok" || echo "CRIT"
+			return
+		fi
+	done
+	for want in $(csv_list "$EXPECT_ON_WARN"); do
+		if test "$want" = "$id"; then
+			test "$output" = "true" && echo "ok" || echo "WARN"
+			return
+		fi
+	done
+	for want in $(csv_list "$EXPECT_OFF_WARN"); do
+		if test "$want" = "$id"; then
+			test "$output" = "false" && echo "ok" || echo "WARN"
+			return
+		fi
+	done
+	echo ""
+}
+
+do_power() {
+	local exit=$OK text="" perf=""
+	for id in $(socket_ids); do
+		json=$(rpc "/rpc/Switch.GetStatus?id=$id") || { echo "UNKNOWN - failed to query socket $id on $HOST"; exit $UNKNOWN; }
+		apower=$(echo "$json" | jq -r '.apower')
+		current=$(echo "$json" | jq -r '.current')
+		output=$(echo "$json" | jq -r '.output')
+		state="ok"
+		if test -n "$POWER_CRIT" && awk "BEGIN{exit !($apower > $POWER_CRIT)}" </dev/null; then
+			exit=$(worse "$exit" "$CRITICAL"); state="CRIT"
+		elif test -n "$POWER_WARN" && awk "BEGIN{exit !($apower > $POWER_WARN)}" </dev/null; then
+			exit=$(worse "$exit" "$WARNING"); state="WARN"
+		fi
+		expect_state=$(check_expect "$id" "$output")
+		case "$expect_state" in
+			CRIT) exit=$(worse "$exit" "$CRITICAL"); state="$state,state-CRIT" ;;
+			WARN) exit=$(worse "$exit" "$WARNING"); state="$state,state-WARN" ;;
+		esac
+		text="$text socket${id}=${apower}W/${current}A(out=${output},${state})"
+		perf="$perf socket${id}_power=${apower}W;${POWER_WARN};${POWER_CRIT};0; socket${id}_current=${current}A;;;0;"
+	done
+	label=OK; test "$exit" -eq "$WARNING" && label=WARNING; test "$exit" -eq "$CRITICAL" && label=CRITICAL
+	echo "$label - power on $HOST:$text | $perf"
+	exit "$exit"
+}
+
+do_voltage() {
+	local exit=$OK text="" perf=""
+	for id in $(socket_ids); do
+		json=$(rpc "/rpc/Switch.GetStatus?id=$id") || { echo "UNKNOWN - failed to query socket $id on $HOST"; exit $UNKNOWN; }
+		voltage=$(echo "$json" | jq -r '.voltage')
+		output=$(echo "$json" | jq -r '.output')
+		state="ok"
+		if awk "BEGIN{exit !($voltage < $VOLT_CRIT_LOW || $voltage > $VOLT_CRIT_HIGH)}" </dev/null; then
+			exit=$(worse "$exit" "$CRITICAL"); state="CRIT"
+		elif awk "BEGIN{exit !($voltage < $VOLT_WARN_LOW || $voltage > $VOLT_WARN_HIGH)}" </dev/null; then
+			exit=$(worse "$exit" "$WARNING"); state="WARN"
+		fi
+		expect_state=$(check_expect "$id" "$output")
+		case "$expect_state" in
+			CRIT) exit=$(worse "$exit" "$CRITICAL"); state="$state,state-CRIT" ;;
+			WARN) exit=$(worse "$exit" "$WARNING"); state="$state,state-WARN" ;;
+		esac
+		text="$text socket${id}=${voltage}V(${state})"
+		perf="$perf socket${id}_voltage=${voltage}V;${VOLT_WARN_LOW}:${VOLT_WARN_HIGH};${VOLT_CRIT_LOW}:${VOLT_CRIT_HIGH};;"
+	done
+	label=OK; test "$exit" -eq "$WARNING" && label=WARNING; test "$exit" -eq "$CRITICAL" && label=CRITICAL
+	echo "$label - voltage on $HOST:$text | $perf"
+	exit "$exit"
+}
+
+do_wifi() {
+	json=$(rpc "/rpc/Shelly.GetStatus") || { echo "UNKNOWN - failed to query $HOST"; exit $UNKNOWN; }
+	rssi=$(echo "$json" | jq -r '.wifi.rssi')
+	status=$(echo "$json" | jq -r '.wifi.status')
+	ssid=$(echo "$json" | jq -r '.wifi.ssid')
+
+	exit=$OK
+	if test "$status" != "got ip"; then
+		echo "CRITICAL - wifi on $HOST not connected (status=$status) | rssi=${rssi}dBm;${RSSI_WARN}:;${RSSI_CRIT}:;;"
+		exit $CRITICAL
+	fi
+	if awk "BEGIN{exit !($rssi < $RSSI_CRIT)}" </dev/null; then
+		exit=$CRITICAL
+	elif awk "BEGIN{exit !($rssi < $RSSI_WARN)}" </dev/null; then
+		exit=$WARNING
+	fi
+	label=OK; test "$exit" -eq "$WARNING" && label=WARNING; test "$exit" -eq "$CRITICAL" && label=CRITICAL
+	echo "$label - wifi on $HOST: ssid=$ssid rssi=${rssi}dBm | rssi=${rssi}dBm;${RSSI_WARN}:;${RSSI_CRIT}:;;"
+	exit "$exit"
+}
+
+do_health() {
+	json=$(rpc "/rpc/Shelly.GetStatus") || { echo "UNKNOWN - failed to query $HOST"; exit $UNKNOWN; }
+	restart_required=$(echo "$json" | jq -r '.sys.restart_required')
+	updates=$(echo "$json" | jq -r '.sys.available_updates | length')
+	unixtime=$(echo "$json" | jq -r '.sys.unixtime')
+	last_sync=$(echo "$json" | jq -r '.sys.last_sync_ts')
+	sync_age=$((unixtime - last_sync))
+
+	exit=$OK
+	text="restart_required=$restart_required updates_available=$updates sync_age=${sync_age}s"
+
+	if test "$restart_required" = "true"; then
+		exit=$(worse "$exit" "$WARNING")
+		text="$text (restart pending)"
+	fi
+	if test "$updates" -gt 0; then
+		exit=$(worse "$exit" "$WARNING")
+		text="$text (firmware update available)"
+	fi
+	if test "$sync_age" -ge "$SYNC_CRIT"; then
+		exit=$(worse "$exit" "$CRITICAL")
+		text="$text (clock not synced recently)"
+	elif test "$sync_age" -ge "$SYNC_WARN"; then
+		exit=$(worse "$exit" "$WARNING")
+		text="$text (clock sync aging)"
+	fi
+
+	label=OK; test "$exit" -eq "$WARNING" && label=WARNING; test "$exit" -eq "$CRITICAL" && label=CRITICAL
+	echo "$label - health on $HOST: $text | sync_age=${sync_age}s;${SYNC_WARN};${SYNC_CRIT};0;"
+	exit "$exit"
+}
+
+# do_state helper: checks each socket in $1 against expected output
+# value $2 ("true"/"false"), escalating to severity $3 (CRITICAL/WARNING)
+# on mismatch. Appends to the caller's (do_state's) exit/text/perf.
+state_check_list() {
+	local list="$1" want_output="$2" sev="$3" sev_label="$4" want_label id json output actual_label
+	want_label=$(test "$want_output" = "true" && echo "on" || echo "off")
+	for id in $(csv_list "$list"); do
+		json=$(rpc "/rpc/Switch.GetStatus?id=$id") || { echo "UNKNOWN - failed to query socket $id on $HOST"; exit $UNKNOWN; }
+		output=$(echo "$json" | jq -r '.output')
+		actual_label=$(test "$output" = "true" && echo "on" || echo "off")
+		if test "$output" = "$want_output"; then
+			text="$text socket${id}=${actual_label}(ok, expected ${want_label})"
+		else
+			exit=$(worse "$exit" "$sev")
+			text="$text socket${id}=${actual_label}(!! expected ${want_label}, ${sev_label})"
+		fi
+		perf="$perf socket${id}_on=$(test "$output" = "true" && echo 1 || echo 0);;;0;1"
+	done
+}
+
+do_state() {
+	if test -z "$EXPECT_ON_CRIT" -a -z "$EXPECT_ON_WARN" -a -z "$EXPECT_OFF_CRIT" -a -z "$EXPECT_OFF_WARN"; then
+		echo "UNKNOWN - --mode=state requires --expect-on, --expect-on-warn, --expect-off, and/or --expect-off-warn"
+		exit $UNKNOWN
+	fi
+
+	local exit=$OK text="" perf=""
+
+	state_check_list "$EXPECT_ON_CRIT" "true" "$CRITICAL" "CRIT"
+	state_check_list "$EXPECT_ON_WARN" "true" "$WARNING" "WARN"
+	state_check_list "$EXPECT_OFF_CRIT" "false" "$CRITICAL" "CRIT"
+	state_check_list "$EXPECT_OFF_WARN" "false" "$WARNING" "WARN"
+
+	label=OK; test "$exit" -eq "$WARNING" && label=WARNING; test "$exit" -eq "$CRITICAL" && label=CRITICAL
+	echo "$label - state on $HOST:$text | $perf"
+	exit "$exit"
+}
+
+case "$MODE" in
+	power) do_power ;;
+	voltage) do_voltage ;;
+	wifi) do_wifi ;;
+	health) do_health ;;
+	state) do_state ;;
+	*)
+		echo "UNKNOWN - unknown mode '$MODE'"
+		exit $UNKNOWN
+		;;
+esac

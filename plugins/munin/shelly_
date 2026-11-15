@@ -1,0 +1,180 @@
+#!/usr/bin/perl
+#
+# shelly_ - Munin plugin for Shelly Gen2+ RPC devices
+#           (developed against a Shelly Power Strip Gen4, S4PL-00416EU)
+#
+# Copyright (C) 2026  Andreas Baumann <mail@andreasbaumann.cc>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# Four graphs depending on symlink name:
+#
+#   shelly_power   — per-socket power draw (W), via Switch.GetStatus
+#   shelly_voltage — per-socket mains voltage (V), via Switch.GetStatus
+#   shelly_energy  — per-socket cumulative energy (Wh) since last boot/
+#                    reset, via Switch.GetStatus (aenergy.total) — resets
+#                    to 0 on a device reboot, so expect sawtooth drops
+#   shelly_wifi    — Wi-Fi signal strength (RSSI, dBm), via Shelly.GetStatus
+#
+# Authentication is HTTP Digest (SHA-256), shelled out to curl rather than
+# done in-process: LWP's digest support historically targets MD5, and
+# Shelly Gen2+/3/4 devices require SHA-256. RPC reference:
+# https://shelly-api-docs.shelly.cloud/gen2/
+#
+# Installation:
+#   cp shelly_ /usr/share/munin/plugins/shelly_
+#   chmod 755  /usr/share/munin/plugins/shelly_
+#   ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_power
+#   ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_voltage
+#   ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_energy
+#   ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_wifi
+#
+# /etc/munin/plugin-conf.d/shelly:
+#   [shelly_*]
+#   env.host europower1.lan
+#   env.user admin
+#   env.password yourpassword
+#   # or, instead of user/password:
+#   env.pwdfile /home/build/.config/shelly/credentials
+#   # sockets to graph for power/voltage/energy (default: 0,1,2,3)
+#   env.sockets 0,1,2,3
+#
+# Requirements: curl, JSON::PP (core Perl module)
+#
+#%# family=contrib
+#%# capabilities=autoconf
+
+use strict;
+use warnings;
+use JSON::PP qw(decode_json);
+
+my $host     = $ENV{host}     // '';
+my $user     = $ENV{user}     // 'admin';
+my $password = $ENV{password} // '';
+my $pwdfile  = $ENV{pwdfile}  // '';
+my $timeout  = $ENV{timeout}  // 10;
+
+if ($pwdfile) {
+    open(my $fh, '<', $pwdfile) or die "cannot read pwdfile $pwdfile: $!\n";
+    my $line = <$fh>;
+    close $fh;
+    chomp $line;
+    ($user, $password) = split('/', $line, 2);
+}
+
+my @sockets = split(/,/, $ENV{sockets} // '0,1,2,3');
+
+(my $self = $0) =~ s{.*/}{};
+my ($graph_type) = ($self =~ /^shelly_(.+)$/);
+$graph_type //= 'power';
+
+# ---- autoconf ---------------------------------------------------------
+
+if (@ARGV && $ARGV[0] eq 'autoconf') {
+    if (!$host) {
+        print "no (set env.host in plugin-conf.d)\n";
+    } else {
+        my $ok = eval { rpc_get('/rpc/Shelly.GetDeviceInfo'); 1 };
+        if ($ok) { print "yes\n" }
+        else     { print "no ($@)\n" }
+    }
+    exit 0;
+}
+
+# ---- config -----------------------------------------------------------
+
+if (@ARGV && $ARGV[0] eq 'config') {
+    if ($graph_type eq 'voltage') {
+        print "graph_title Shelly Voltage ($host)\n";
+        print "graph_args --base 1000 --lower-limit 200 --upper-limit 260\n";
+        print "graph_vlabel Volt\n";
+        print "graph_category sensors\n";
+        print "graph_info Per-socket mains voltage reported by the Shelly power strip.\n";
+        for my $id (@sockets) {
+            print "socket${id}.label Socket $id\n";
+            print "socket${id}.draw LINE2\n";
+            print "socket${id}.info Mains voltage measured at socket $id.\n";
+        }
+    } elsif ($graph_type eq 'energy') {
+        print "graph_title Shelly Energy ($host)\n";
+        print "graph_args --base 1000 --lower-limit 0\n";
+        print "graph_vlabel Watt-hours\n";
+        print "graph_category sensors\n";
+        print "graph_info Per-socket cumulative energy since last device boot/reset. Drops to 0 on reboot.\n";
+        for my $id (@sockets) {
+            print "socket${id}.label Socket $id\n";
+            print "socket${id}.draw LINE2\n";
+            print "socket${id}.min 0\n";
+            print "socket${id}.info Cumulative energy drawn by socket $id since last boot/reset.\n";
+        }
+    } elsif ($graph_type eq 'wifi') {
+        print "graph_title Shelly Wi-Fi Signal ($host)\n";
+        print "graph_args --base 1000 --lower-limit -100 --upper-limit 0\n";
+        print "graph_vlabel dBm\n";
+        print "graph_category network\n";
+        print "graph_info Wi-Fi RSSI as seen by the device itself.\n";
+        print "rssi.label RSSI\n";
+        print "rssi.draw LINE2\n";
+        print "rssi.warning -70:\n";
+        print "rssi.critical -80:\n";
+        print "rssi.info Received signal strength at the device; closer to 0 is better.\n";
+    } else {
+        print "graph_title Shelly Power ($host)\n";
+        print "graph_args --base 1000 --lower-limit 0\n";
+        print "graph_vlabel Watt\n";
+        print "graph_category sensors\n";
+        print "graph_info Per-socket real power draw.\n";
+        print "graph_order " . join(' ', map { "socket$_" } @sockets) . "\n";
+        for my $id (@sockets) {
+            print "socket${id}.label Socket $id\n";
+            print "socket${id}.draw AREASTACK\n";
+            print "socket${id}.min 0\n";
+            print "socket${id}.info Real power drawn by socket $id.\n";
+        }
+    }
+    exit 0;
+}
+
+# ---- fetch ------------------------------------------------------------
+
+if ($graph_type eq 'wifi') {
+    my $status = rpc_get('/rpc/Shelly.GetStatus');
+    printf "rssi.value %d\n", $status->{wifi}{rssi};
+} else {
+    for my $id (@sockets) {
+        my $status = rpc_get("/rpc/Switch.GetStatus?id=$id");
+        if ($graph_type eq 'voltage') {
+            printf "socket%s.value %.1f\n", $id, $status->{voltage};
+        } elsif ($graph_type eq 'energy') {
+            printf "socket%s.value %.3f\n", $id, $status->{aenergy}{total};
+        } else {
+            printf "socket%s.value %.1f\n", $id, $status->{apower};
+        }
+    }
+}
+
+exit 0;
+
+# ---- helpers ----------------------------------------------------------
+
+sub rpc_get {
+    my ($path) = @_;
+    die "env.host not set\n" unless $host;
+    my $url = "http://$host$path";
+    my $out = qx(curl -sf -m $timeout --digest -u '$user:$password' '$url' 2>/dev/null);
+    if ($? != 0 || !$out) {
+        die "RPC request to $url failed (check host/credentials/network)\n";
+    }
+    return decode_json($out);
+}
