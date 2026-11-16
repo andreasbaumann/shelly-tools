@@ -95,6 +95,7 @@ Interactive on/off/status CLI for day-to-day use.
 
 ```sh
 ./shelly_switch.sh <host> <socket 0-3|all|led> <on|off|status>
+./shelly_switch.sh <host> led brightness <0-100|status>
 ```
 
 Examples:
@@ -108,6 +109,8 @@ Examples:
 ./shelly_switch.sh europower1.lan led off      # disable all LED indication
 ./shelly_switch.sh europower1.lan led on       # back to "power" mode
 ./shelly_switch.sh europower1.lan led status
+./shelly_switch.sh europower1.lan led brightness 80     # set LED brightness to 80%
+./shelly_switch.sh europower1.lan led brightness status # query current LED brightness
 
 ./shelly_switch.sh europower2.lan 0 on         # same usage against the second strip
 ```
@@ -115,6 +118,12 @@ Examples:
 `led on`/`led off` map to the `POWERSTRIP_UI` modes `power`/`off` (see
 above) and apply to all 4 sockets' LEDs at once — there's no per-socket
 LED on/off, only per-socket LED *color* (not exposed by this script).
+
+`led brightness <0-100>` sets `leds.colors.power.brightness`, i.e. the
+brightness used while in `"power"` mode (power draw still controls which
+LEDs light up/their color — this only scales overall intensity). It does
+not touch `night_mode`'s separate scheduled-dimming brightness, which
+isn't exposed by this script.
 
 Requires `curl` and `jq`. Reads credentials from
 `~/.config/shelly/credentials` (override with `SHELLY_PWD_FILE=/path/to/file`),

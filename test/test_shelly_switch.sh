@@ -69,6 +69,20 @@ if [ "$orig_mode" = "off" ]; then
 	"$SCRIPT" "$HOST" led off >/dev/null 2>&1
 fi
 
+# 'led brightness' subcommand - round trip, then restore the original value
+orig_brightness=$("$SCRIPT" "$HOST" led brightness status 2>&1 | sed -n 's/.*: //p')
+
+out=$("$SCRIPT" "$HOST" led brightness 42 2>&1); code=$?
+assert_exit "'led brightness 42' exits 0" 0 "$code"
+assert_contains "'led brightness 42' reports set to 42" "$out" "set to 42"
+
+out=$("$SCRIPT" "$HOST" led brightness status 2>&1)
+assert_contains "'led brightness status' after set shows 42" "$out" ": 42"
+
+if [ -n "$orig_brightness" ] && [ "$orig_brightness" != "null" ]; then
+	"$SCRIPT" "$HOST" led brightness "$orig_brightness" >/dev/null 2>&1
+fi
+
 done
 
 # error handling (no network calls expected to happen for these - run
@@ -86,5 +100,17 @@ assert_contains "invalid state reports an error" "$out" "Error"
 out=$("$SCRIPT" "$HOST" 3 2>&1); code=$?
 assert_exit "missing 3rd argument is rejected" 1 "$code"
 assert_contains "missing argument shows usage" "$out" "Usage"
+
+out=$("$SCRIPT" "$HOST" 3 brightness 50 2>&1); code=$?
+assert_exit "'brightness' on a plain socket is rejected" 1 "$code"
+assert_contains "'brightness' on a plain socket reports an error" "$out" "Error"
+
+out=$("$SCRIPT" "$HOST" led brightness 101 2>&1); code=$?
+assert_exit "out-of-range brightness (101) is rejected" 1 "$code"
+assert_contains "out-of-range brightness reports an error" "$out" "Error"
+
+out=$("$SCRIPT" "$HOST" led brightness 2>&1); code=$?
+assert_exit "'led brightness' with no value shows usage" 1 "$code"
+assert_contains "missing brightness value shows usage" "$out" "Usage"
 
 summary
