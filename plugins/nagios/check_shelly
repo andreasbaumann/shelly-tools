@@ -180,7 +180,16 @@ if test -n "$PWDFILE"; then
 		echo "UNKNOWN - cannot read pwdfile $PWDFILE"
 		exit $UNKNOWN
 	fi
-	creds=$(head -n1 "$PWDFILE")
+	creds=""
+	while IFS= read -r line; do
+		case "$line" in
+			"${HOST}:"*) creds="${line#*:}"; while test "${creds# }" != "$creds"; do creds="${creds# }"; done; break ;;
+		esac
+	done < "$PWDFILE"
+	if test -z "$creds"; then
+		echo "UNKNOWN - no credentials for host '$HOST' in $PWDFILE"
+		exit $UNKNOWN
+	fi
 	USERNAME="${creds%%/*}"
 	PASSWORD="${creds#*/}"
 fi

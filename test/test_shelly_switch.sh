@@ -1,13 +1,16 @@
 #!/bin/sh
-# Integration tests for ../tools/shelly_switch.sh against a real device.
-# Requires network access to the device and a readable credentials file.
+# Integration tests for ../tools/shelly_switch.sh against real devices.
+# Requires network access to the device(s) and a readable, host-keyed
+# credentials file (see tools/README.md).
 set -u
 cd "$(dirname "$0")"
 . ./lib.sh
 
 SCRIPT=../tools/shelly_switch.sh
-HOST="${SHELLY_TEST_HOST:-europower1.lan}"
+HOSTS="${SHELLY_TEST_HOSTS:-europower1.lan europower2.lan}"
 export SHELLY_PWD_FILE="${SHELLY_TEST_PWDFILE:-$HOME/.config/shelly/credentials}"
+
+for HOST in $HOSTS; do
 
 echo "== shelly_switch.sh (host: $HOST) =="
 
@@ -66,7 +69,12 @@ if [ "$orig_mode" = "off" ]; then
 	"$SCRIPT" "$HOST" led off >/dev/null 2>&1
 fi
 
-# error handling (no network calls expected to happen for these)
+done
+
+# error handling (no network calls expected to happen for these - run
+# once, not per host, since none of this depends on which device is named)
+HOST=$(echo "$HOSTS" | cut -d' ' -f1)
+
 out=$("$SCRIPT" "$HOST" 9 status 2>&1); code=$?
 assert_exit "invalid socket number (9) is rejected" 1 "$code"
 assert_contains "invalid socket number reports an error" "$out" "Error"

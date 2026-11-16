@@ -27,7 +27,13 @@ esac
 pwd_file="${SHELLY_PWD_FILE:-$HOME/.config/shelly/credentials}"
 [[ -r "$pwd_file" ]] || { echo "Error: credentials file not found: $pwd_file" >&2; exit 1; }
 
-creds=$(head -n1 "$pwd_file")
+creds=""
+while IFS= read -r line; do
+    case "$line" in
+        "${host}:"*) creds="${line#*:}"; while [[ "$creds" == " "* ]]; do creds="${creds# }"; done; break ;;
+    esac
+done < "$pwd_file"
+[[ -n "$creds" ]] || { echo "Error: no credentials for host '$host' in $pwd_file" >&2; exit 1; }
 user="${creds%%/*}"
 pass="${creds#*/}"
 

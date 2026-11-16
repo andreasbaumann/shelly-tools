@@ -1,16 +1,24 @@
 # Shelly Power Strip Gen4
 
-Control and monitoring for a Shelly Power Strip Gen4, talked to directly
-over its local RPC API (the device is local-only — no cloud/MQTT).
+Control and monitoring for Shelly Power Strip Gen4 devices, talked to
+directly over their local RPC API (the devices are local-only — no
+cloud/MQTT). All tooling is host-parameterized, so it works against any
+number of these strips; two are deployed on this network today.
 
-## Device
+## Devices
 
 - Product: [Shelly Power Strip Gen4](https://kb.shelly.cloud/knowledge-base/shelly-power-strip-gen4)
-- Hostname on this network: `europower1.lan` (IP `192.168.1.3`)
-- Device id / realm: `shellypstripg4-d885acecee84`
-- Model `S4PL-00416EU`, gen `4`, app `PowerStrip`, fw `1.7.99-powerstripg4prod1`
-- 4 switchable sockets, ids `0`-`3`
-- Connected via Wi-Fi (SSID `Fornost`); cloud/MQTT/WS integrations disabled, control is local-only
+- Model `S4PL-00416EU`, gen `4`, app `PowerStrip`
+- 4 switchable sockets per device, ids `0`-`3`
+- Connected via Wi-Fi; cloud/MQTT/WS integrations disabled, control is local-only
+
+| Hostname | IP | Device id / realm | Firmware |
+|---|---|---|---|
+| `europower1.lan` | `192.168.1.x` | `shellypstripg4-xxxxxxxxxxxx` | `1.7.99-powerstripg4prod1` |
+| `europower2.lan` | — | — | — |
+
+Each device has its own admin password — see [credentials](tools/README.md#authentication)
+in `tools/README.md` for the per-host credentials file format.
 
 ## Layout
 
@@ -22,7 +30,7 @@ over its local RPC API (the device is local-only — no cloud/MQTT).
 - **[`plugins/munin/`](plugins/munin/README.md)** — `shelly_`, a Munin
   plugin graphing power/voltage/energy/wifi over time.
 - **[`test/`](test/run_all.sh)** — integration tests for all three,
-  run against the real device via `test/run_all.sh`.
+  run against the real devices via `test/run_all.sh`.
 
 ## License
 

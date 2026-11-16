@@ -65,18 +65,25 @@ my $password = $ENV{password} // '';
 my $pwdfile  = $ENV{pwdfile}  // '';
 my $timeout  = $ENV{timeout}  // 10;
 
-if ($pwdfile) {
+if ($pwdfile && $host) {
     open(my $fh, '<', $pwdfile) or die "cannot read pwdfile $pwdfile: $!\n";
-    my $line = <$fh>;
+    my $found;
+    while (my $line = <$fh>) {
+        chomp $line;
+        if ($line =~ /^\Q$host\E:\s*(.*)$/) {
+            ($user, $password) = split('/', $1, 2);
+            $found = 1;
+            last;
+        }
+    }
     close $fh;
-    chomp $line;
-    ($user, $password) = split('/', $line, 2);
+    die "no credentials for host '$host' in $pwdfile\n" unless $found;
 }
 
 my @sockets = split(/,/, $ENV{sockets} // '0,1,2,3');
 
 (my $self = $0) =~ s{.*/}{};
-my ($graph_type) = ($self =~ /^shelly_(.+)$/);
+my ($graph_type) = ($self =~ /^shelly_(power|voltage|energy|wifi)(?:_.+)?$/);
 $graph_type //= 'power';
 
 # ---- autoconf ---------------------------------------------------------

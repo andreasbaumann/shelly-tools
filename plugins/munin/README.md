@@ -1,7 +1,10 @@
 # shelly_
 
-Munin plugin for Shelly Gen2+ RPC devices, developed against a Shelly
-Power Strip Gen4 (model `S4PL-00416EU`).
+Munin plugin for Shelly Gen2+ RPC devices, developed against Shelly
+Power Strip Gen4 devices (model `S4PL-00416EU`). One plugin instance
+monitors one device; run multiple instances (via Munin's standard
+multi-instance symlink naming) to monitor several strips, e.g.
+`europower1.lan` and `europower2.lan`.
 
 ## What it monitors
 
@@ -48,33 +51,63 @@ MD5, and Shelly Gen2+/3/4 devices require SHA-256.
 ```sh
 cp shelly_ /usr/share/munin/plugins/
 chmod 755  /usr/share/munin/plugins/shelly_
+```
+
+For a single device, symlink the four graph types directly:
+
+```sh
 ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_power
 ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_voltage
 ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_energy
 ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_wifi
 ```
 
+For multiple devices, append an instance suffix per Munin's standard
+multi-instance convention (one set of four symlinks per device):
+
+```sh
+for g in power voltage energy wifi; do
+    ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_${g}_europower1
+    ln -s /usr/share/munin/plugins/shelly_ /etc/munin/plugins/shelly_${g}_europower2
+done
+```
+
 ## Configuration
 
-Create `/etc/munin/plugin-conf.d/shelly`:
+Create `/etc/munin/plugin-conf.d/shelly`, one stanza per device instance
+(a bare `[shelly_*]` stanza instead applies the same `env.host` to every
+instance, which only makes sense for a single device):
 
 ```ini
-[shelly_*]
+[shelly_*_europower1]
 env.host europower1.lan
 env.pwdfile /home/build/.config/shelly/credentials
 # sockets to graph for power/voltage/energy (default: 0,1,2,3)
 env.sockets 0,1,2,3
 # curl timeout in seconds (default: 10)
 env.timeout 10
+
+[shelly_*_europower2]
+env.host europower2.lan
+env.pwdfile /home/build/.config/shelly/credentials
+env.sockets 0,1,2,3
+env.timeout 10
 ```
 
-Or, instead of `env.pwdfile`, explicit credentials:
+`env.pwdfile` holds credentials for both devices, keyed by hostname — see
+[credentials](../../tools/README.md#authentication) in `tools/README.md`.
+Or, instead of `env.pwdfile`, explicit credentials per instance:
 
 ```ini
-[shelly_*]
+[shelly_*_europower1]
 env.host europower1.lan
 env.user admin
-env.password yourpassword
+env.password secret1
+
+[shelly_*_europower2]
+env.host europower2.lan
+env.user admin
+env.password secret2
 ```
 
 Graphing only a subset of sockets (e.g. just the one the NAS is plugged
@@ -82,7 +115,7 @@ into) — `shelly_power`/`shelly_voltage`/`shelly_energy` only draw the
 listed sockets, `shelly_wifi` is unaffected since it's device-wide:
 
 ```ini
-[shelly_*]
+[shelly_*_europower1]
 env.host europower1.lan
 env.pwdfile /home/build/.config/shelly/credentials
 env.sockets 3
@@ -98,20 +131,23 @@ systemctl restart munin-node
 
 ```sh
 # Test autoconf (should print "yes")
-munin-run shelly_power autoconf
+munin-run shelly_power_europower1 autoconf
 
 # Test config output
-munin-run shelly_power config
-munin-run shelly_voltage config
-munin-run shelly_energy config
-munin-run shelly_wifi config
+munin-run shelly_power_europower1 config
+munin-run shelly_voltage_europower1 config
+munin-run shelly_energy_europower1 config
+munin-run shelly_wifi_europower1 config
 
 # Test data fetch
-munin-run shelly_power
-munin-run shelly_voltage
-munin-run shelly_energy
-munin-run shelly_wifi
+munin-run shelly_power_europower1
+munin-run shelly_voltage_europower1
+munin-run shelly_energy_europower1
+munin-run shelly_wifi_europower1
 ```
+
+(drop the `_europower1` suffix for a single-device install, or repeat
+against `_europower2` for the second device.)
 
 `munin-node-configure --suggest` will also list the plugin as available
 once credentials are in place.
@@ -119,10 +155,12 @@ once credentials are in place.
 ## Developer reference
 
 The graph shown depends on the symlink name the script is invoked as
-(`shelly_power`, `shelly_voltage`, `shelly_energy`, or `shelly_wifi`),
-read from `$0`. RPC endpoint details and the device's auth requirement
-are documented in [`../../tools/README.md`](../../tools/README.md#rpc-api).
-Gen2+/3/4 RPC reference: https://shelly-api-docs.shelly.cloud/gen2/
+(`shelly_power`, `shelly_voltage`, `shelly_energy`, or `shelly_wifi`,
+each optionally followed by `_<instance>` per Munin's multi-instance
+convention — e.g. `shelly_power_europower2`), read from `$0`. RPC
+endpoint details and the devices' auth requirement are documented in
+[`../../tools/README.md`](../../tools/README.md#rpc-api). Gen2+/3/4 RPC
+reference: https://shelly-api-docs.shelly.cloud/gen2/
 
 ## Nagios/Icinga companion
 

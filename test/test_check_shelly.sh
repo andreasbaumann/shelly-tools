@@ -1,34 +1,39 @@
 #!/bin/sh
-# Integration tests for ../plugins/nagios/check_shelly against a real device.
+# Integration tests for ../plugins/nagios/check_shelly against real devices.
 #
-# Threshold tests rely on socket 3 carrying its observed small (~5W)
-# continuous load and mains sitting near 230V - that's how this specific
-# device/socket behaves, not a property of the plugin, so these may need
+# Voltage tests rely on mains sitting near 230V - that's how this specific
+# hardware setup behaves, not a property of the plugin, so these may need
 # adjusting if the test hardware setup changes.
+#
+# Power-threshold tests don't rely on socket 3 carrying any particular
+# load: they pass deliberately out-of-range thresholds (e.g. --warn=-1,
+# always exceeded) so the result is independent of whatever socket 3
+# happens to be drawing at test time.
 set -u
 cd "$(dirname "$0")"
 . ./lib.sh
 
 SCRIPT=../plugins/nagios/check_shelly
 SWITCH=../tools/shelly_switch.sh
-HOST="${SHELLY_TEST_HOST:-europower1.lan}"
+HOSTS="${SHELLY_TEST_HOSTS:-europower1.lan europower2.lan}"
 PWDFILE="${SHELLY_TEST_PWDFILE:-$HOME/.config/shelly/credentials}"
+
+for HOST in $HOSTS; do
 
 echo "== check_shelly (host: $HOST) =="
 
-# make sure socket 3 is on and drawing its usual small load before the
-# power-threshold tests below
+# make sure socket 3 is on before the power-threshold tests below
 "$SWITCH" "$HOST" 3 on >/dev/null 2>&1
 
 out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=power 2>&1); code=$?
 assert_exit "power mode with no thresholds is OK" 0 "$code"
 assert_contains "power output reports all 4 sockets" "$out" "socket3="
 
-out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=power --warn=1 --crit=1000 2>&1); code=$?
-assert_exit "power mode: socket3 load (~5W) above warn=1 -> WARNING" 1 "$code"
+out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=power --warn=-1 --crit=100000 2>&1); code=$?
+assert_exit "power mode: warn=-1 always exceeded -> WARNING" 1 "$code"
 
-out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=power --warn=0 --crit=0.001 2>&1); code=$?
-assert_exit "power mode: socket3 load above crit=0.001 -> CRITICAL" 2 "$code"
+out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=power --warn=-1 --crit=-1 2>&1); code=$?
+assert_exit "power mode: crit=-1 always exceeded -> CRITICAL" 2 "$code"
 
 out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=voltage 2>&1); code=$?
 assert_exit "voltage mode with default thresholds is OK" 0 "$code"
@@ -46,8 +51,10 @@ assert_contains "wifi output reports rssi" "$out" "rssi="
 out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=wifi --warn=-10 --crit=-20 2>&1); code=$?
 assert_exit "wifi mode: strong signal below crit=-20 -> CRITICAL" 2 "$code"
 
+# both devices currently have a pending firmware update, so health
+# mode is WARNING, not OK - revisit once the updates are applied
 out=$("$SCRIPT" --host="$HOST" --pwdfile="$PWDFILE" --mode=health 2>&1); code=$?
-assert_exit "health mode is OK" 0 "$code"
+assert_exit "health mode: pending firmware update -> WARNING" 1 "$code"
 assert_contains "health output reports restart_required" "$out" "restart_required="
 
 # state mode: socket 3 is on (ensured above); pick another socket and
@@ -91,7 +98,13 @@ assert_contains "power mode mismatch is flagged in the socket text" "$out" "stat
 
 "$SWITCH" "$HOST" 1 on >/dev/null 2>&1
 
-# argument / connectivity error handling
+done
+
+# argument / connectivity error handling (run once, not per host - none
+# of this depends on which device is named)
+HOST=$(echo "$HOSTS" | cut -d' ' -f1)
+PWDFILE="${SHELLY_TEST_PWDFILE:-$HOME/.config/shelly/credentials}"
+
 out=$("$SCRIPT" --mode=power 2>&1); code=$?
 assert_exit "missing --host -> UNKNOWN" 3 "$code"
 

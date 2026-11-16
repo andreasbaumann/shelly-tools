@@ -1,7 +1,10 @@
 # check_shelly
 
-A Nagios/Icinga plugin for Shelly Gen2+ RPC devices, developed against a
-Shelly Power Strip Gen4 (model `S4PL-00416EU`).
+A Nagios/Icinga plugin for Shelly Gen2+ RPC devices, developed against
+Shelly Power Strip Gen4 devices (model `S4PL-00416EU`). Each invocation
+checks one device (`--host=...`); monitoring several strips just means
+one set of service definitions per host, as shown below for
+`europower1.lan`/`europower2.lan`.
 
 ## What it does
 
@@ -45,9 +48,19 @@ cp check_shelly /usr/lib/nagios/plugins/check_shelly
 chmod 755       /usr/lib/nagios/plugins/check_shelly
 ```
 
-Credentials are read via `--pwdfile=FILE` (one line, `username/password`)
-or explicit `--user=`/`--password=`. This project's own tooling keeps
-that file at `~/.config/shelly/credentials`.
+Credentials are read via `--pwdfile=FILE` or explicit `--user=`/`--password=`.
+This project's own tooling keeps that file at `~/.config/shelly/credentials`,
+one line per device, keyed by hostname (each device has its own admin
+password — see [credentials](../../tools/README.md#authentication) in
+`tools/README.md`):
+
+```
+europower1.lan:admin/secret1
+europower2.lan:admin/secret2
+```
+
+The same `--pwdfile` works for every host — `check_shelly` looks up the
+line matching whatever `--host` it's given.
 
 ## Usage
 
@@ -57,6 +70,8 @@ that file at `~/.config/shelly/credentials`.
 ./check_shelly --host=europower1.lan --pwdfile=~/.config/shelly/credentials --mode=wifi
 ./check_shelly --host=europower1.lan --pwdfile=~/.config/shelly/credentials --mode=health
 ./check_shelly --host=europower1.lan --pwdfile=~/.config/shelly/credentials --mode=state --expect-on=3 --expect-off-warn=2
+
+./check_shelly --host=europower2.lan --pwdfile=~/.config/shelly/credentials --mode=power --warn=1800 --crit=2300
 ```
 
 ## Example configurations
@@ -112,6 +127,19 @@ define service {
 }
 ```
 
+Repeat the same set of service definitions with `host_name europower2`
+and `europower2.lan` to cover the second strip — the shared `pwdfile`
+already holds credentials for both:
+
+```
+define service {
+    host_name           europower2
+    service_description Shelly Power
+    check_command       check_shelly!europower2.lan!/home/build/.config/shelly/credentials!power!--warn=1800 --crit=2300
+    use                 generic-service
+}
+```
+
 (The trailing `!` on the services with no extra flags is required — it's
 the empty `$ARG4$`.)
 
@@ -137,8 +165,13 @@ object CheckCommand "shelly" {
 }
 
 object Host "europower1" {
-    address = "192.168.1.3"
+    address = "192.168.1.x"
     vars.shelly_host = "europower1.lan"
+    vars.shelly_pwdfile = "/home/build/.config/shelly/credentials"
+}
+
+object Host "europower2" {
+    vars.shelly_host = "europower2.lan"
     vars.shelly_pwdfile = "/home/build/.config/shelly/credentials"
 }
 
@@ -177,9 +210,13 @@ apply Service "shelly-nas-state" {
 }
 ```
 
+Each `apply Service` already matches every `Host` with `vars.shelly_host`
+set, so adding `europower2` above is enough — no need to duplicate the
+`apply Service` blocks per device.
+
 ## Developer reference
 
-RPC endpoints used, and the device's HTTP Digest (SHA-256) auth
+RPC endpoints used, and the devices' HTTP Digest (SHA-256) auth
 requirement, are documented in [`../../tools/README.md`](../../tools/README.md#rpc-api).
 Gen2+/3/4 RPC reference: https://shelly-api-docs.shelly.cloud/gen2/
 

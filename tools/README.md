@@ -1,28 +1,33 @@
 # tools
 
-Interactive CLI tooling for the Shelly Power Strip Gen4 (see the
-top-level [README](../README.md) for what the device is), plus the RPC
+Interactive CLI tooling for Shelly Power Strip Gen4 devices (see the
+top-level [README](../README.md) for what the devices are), plus the RPC
 API and authentication background shared by the Nagios/Munin plugins in
 `../plugins/`.
 
 ## Authentication
 
-The device requires **HTTP Digest authentication** (`WWW-Authenticate: Digest`,
+Each device requires **HTTP Digest authentication** (`WWW-Authenticate: Digest`,
 `algorithm=SHA-256`) on all `/rpc/*` endpoints once a password is set. An
-unauthenticated request returns `401 Unauthorized` with the realm string
-shown above.
+unauthenticated request returns `401 Unauthorized` with the device's realm
+string (e.g. `shellypstripg4-xxxxxxxxxxxx` for europower1 — see the
+top-level [README](../README.md#devices)).
 
 Credentials live at `~/.config/shelly/credentials` (mode `600`), one line
-in the format:
+per device, keyed by hostname — each device has its own admin password:
 
 ```
-username/password
+europower1.lan:admin/secret1
+europower2.lan:admin/secret2
 ```
 
-The username is always `admin` for this device.
+(a space after the colon is fine too). Every tool and plugin in this repo
+looks up the line matching the `--host`/`host` it was given; there's no
+positional "first line wins" fallback. The username is always `admin` for
+these devices.
 
-LWP's built-in Digest auth support historically targets MD5, and this
-device requires SHA-256, so the Munin plugin shells out to `curl --digest`
+LWP's built-in Digest auth support historically targets MD5, and these
+devices require SHA-256, so the Munin plugin shells out to `curl --digest`
 rather than doing auth in-process — same reasoning as this script.
 
 ## RPC API
@@ -103,6 +108,8 @@ Examples:
 ./shelly_switch.sh europower1.lan led off      # disable all LED indication
 ./shelly_switch.sh europower1.lan led on       # back to "power" mode
 ./shelly_switch.sh europower1.lan led status
+
+./shelly_switch.sh europower2.lan 0 on         # same usage against the second strip
 ```
 
 `led on`/`led off` map to the `POWERSTRIP_UI` modes `power`/`off` (see
@@ -110,19 +117,20 @@ above) and apply to all 4 sockets' LEDs at once — there's no per-socket
 LED on/off, only per-socket LED *color* (not exposed by this script).
 
 Requires `curl` and `jq`. Reads credentials from
-`~/.config/shelly/credentials` (override with `SHELLY_PWD_FILE=/path/to/file`).
+`~/.config/shelly/credentials` (override with `SHELLY_PWD_FILE=/path/to/file`),
+looking up the line keyed to whichever `<host>` is passed on the command line.
 
 ## Findings / gotchas
 
-- `europower1` alone does not resolve on this network; use the full name
-  `europower1.lan` (or the IP `192.168.1.3` directly).
+- `europower1`/`europower2` alone do not resolve on this network; use the
+  full name (`europower1.lan`, `europower2.lan`) or the device's IP
+  directly.
 - `curl`'s `-f` flag combined with `--digest` fails silently (exit 22, no
   body) if credentials are wrong or the digest handshake fails — drop `-f`
   temporarily when debugging.
-- All four sockets were observed to be "on" (`output: true`) by default
-  with nothing drawing power, except socket 3 which had a small steady
-  load (~5W) — worth knowing before setting tight power thresholds in the
-  Nagios plugin.
+- Socket power draw varies over time and by device/socket — don't assume
+  a particular socket is idle or loaded; check current state before
+  setting tight power thresholds in the Nagios plugin.
 
 ## Generated with
 
