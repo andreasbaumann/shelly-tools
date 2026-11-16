@@ -41,6 +41,31 @@ for s in 0 1 2 3; do
 	assert_contains "'all status' includes socket $s" "$out" "Socket $s on $HOST"
 done
 
+# 'led' subcommand - on/off round trip, verifying POWERSTRIP_UI config
+# actually changes, then restoring the original mode.
+orig_mode=$("$SCRIPT" "$HOST" led status 2>&1 | sed -n 's/.*mode=//p')
+
+out=$("$SCRIPT" "$HOST" led off 2>&1); code=$?
+assert_exit "'led off' exits 0" 0 "$code"
+assert_contains "'led off' reports mode set to off" "$out" "mode set to off"
+
+out=$("$SCRIPT" "$HOST" led status 2>&1)
+assert_contains "'led status' after off shows mode=off" "$out" "mode=off"
+
+out=$("$SCRIPT" "$HOST" led on 2>&1); code=$?
+assert_exit "'led on' exits 0" 0 "$code"
+assert_contains "'led on' reports mode set to power" "$out" "mode set to power"
+
+out=$("$SCRIPT" "$HOST" led status 2>&1)
+assert_contains "'led status' after on shows mode=power" "$out" "mode=power"
+
+# restore the device's original LED mode (only "power" and "off" are
+# reachable through the on/off subcommand; leave anything else, e.g.
+# "switch", as "power" rather than fail trying to restore it)
+if [ "$orig_mode" = "off" ]; then
+	"$SCRIPT" "$HOST" led off >/dev/null 2>&1
+fi
+
 # error handling (no network calls expected to happen for these)
 out=$("$SCRIPT" "$HOST" 9 status 2>&1); code=$?
 assert_exit "invalid socket number (9) is rejected" 1 "$code"

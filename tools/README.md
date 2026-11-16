@@ -38,6 +38,8 @@ Endpoints used across this repo:
 | `GET /rpc/Shelly.GetDeviceInfo` | Model/firmware identity |
 | `GET /rpc/Switch.GetStatus?id=<0-3>` | Status of a single socket |
 | `GET /rpc/Switch.Set?id=<0-3>&on=<true\|false>` | Turn a socket on/off |
+| `GET /rpc/POWERSTRIP_UI.GetConfig` | Current LED indication config (all 4 sockets) |
+| `GET /rpc/POWERSTRIP_UI.SetConfig?config=<json>` | Change LED indication config |
 
 `Switch.GetStatus` fields of interest: `output` (bool), `apower` (W),
 `voltage` (V), `current` (A), `pf` (power factor), `aenergy.total` (Wh,
@@ -51,6 +53,30 @@ sync), `wifi.rssi` (dBm) / `wifi.status` (`"got ip"` when actually
 connected), `cloud.connected` / `mqtt.connected` / `ws.connected` (all
 `false` here — this device is local-only by design).
 
+`POWERSTRIP_UI` controls the LED indication for all 4 sockets as one unit
+(there's no per-socket on/off for the LEDs themselves, though per-socket
+colors can be set under `leds.colors["switch:0"]` etc. — see the [Gen2+ RPC
+docs](https://shelly-api-docs.shelly.cloud/gen2/)). `leds.mode` is the main
+switch: `"power"` (brightness reflects power draw — the default), `"switch"`
+(reflects on/off state), or `"off"` (LEDs fully disabled, including the
+green power/connected light). There's also `night_mode` (`enable`,
+`brightness`, `active_between: ["HH:MM","HH:MM"]`) to just dim the LEDs on a
+schedule instead of disabling them outright.
+
+Example (raw curl, digest auth, disabling the LEDs):
+
+```sh
+curl --digest -u admin:PASSWORD -G \
+  --data-urlencode 'config={"leds":{"mode":"off"}}' \
+  "http://europower1.lan/rpc/POWERSTRIP_UI.SetConfig"
+```
+
+Note: `POWERSTRIP_UI.SetConfig` must be called as a `GET` with
+`curl -G --data-urlencode` (as above), not a `POST` with a JSON body — the
+device returns `400 Bad Request` to a body-less POST before curl's digest
+auth gets a chance to retry with credentials, so the handshake never
+completes.
+
 Example (raw curl, digest auth):
 
 ```sh
@@ -63,7 +89,7 @@ curl --digest -u admin:PASSWORD \
 Interactive on/off/status CLI for day-to-day use.
 
 ```sh
-./shelly_switch.sh <host> <socket 0-3|all> <on|off|status>
+./shelly_switch.sh <host> <socket 0-3|all|led> <on|off|status>
 ```
 
 Examples:
@@ -74,7 +100,14 @@ Examples:
 ./shelly_switch.sh europower1.lan 3 status
 ./shelly_switch.sh europower1.lan all status
 ./shelly_switch.sh europower1.lan all off
+./shelly_switch.sh europower1.lan led off      # disable all LED indication
+./shelly_switch.sh europower1.lan led on       # back to "power" mode
+./shelly_switch.sh europower1.lan led status
 ```
+
+`led on`/`led off` map to the `POWERSTRIP_UI` modes `power`/`off` (see
+above) and apply to all 4 sockets' LEDs at once — there's no per-socket
+LED on/off, only per-socket LED *color* (not exposed by this script).
 
 Requires `curl` and `jq`. Reads credentials from
 `~/.config/shelly/credentials` (override with `SHELLY_PWD_FILE=/path/to/file`).

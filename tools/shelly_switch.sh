@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Control or query a socket on a Shelly Power Strip Gen4 via RPC.
+# Control or query a socket, or the LED indication, on a Shelly Power Strip
+# Gen4 via RPC.
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <host> <socket 0-3|all> <on|off|status>" >&2
+    echo "Usage: $0 <host> <socket 0-3|all|led> <on|off|status>" >&2
     echo "Example: $0 europower1.lan 3 on" >&2
     echo "Example: $0 europower1.lan all status" >&2
+    echo "Example: $0 europower1.lan led off" >&2
     exit 1
 }
 
@@ -15,7 +17,7 @@ host="$1"
 socket="$2"
 state="$3"
 
-[[ "$socket" =~ ^[0-3]$ || "$socket" == "all" ]] || { echo "Error: socket must be 0-3 or 'all'" >&2; exit 1; }
+[[ "$socket" =~ ^[0-3]$ || "$socket" == "all" || "$socket" == "led" ]] || { echo "Error: socket must be 0-3, 'all', or 'led'" >&2; exit 1; }
 
 case "$state" in
     on|off|status|get) ;;
@@ -52,7 +54,28 @@ run_one() {
     esac
 }
 
-if [[ "$socket" == "all" ]]; then
+run_led() {
+    case "$state" in
+        on|off)
+            local mode
+            mode=$([[ "$state" == "on" ]] && echo power || echo off)
+            curl -sf -m 10 --digest -u "${user}:${pass}" -G \
+                --data-urlencode "config={\"leds\":{\"mode\":\"${mode}\"}}" \
+                "http://${host}/rpc/POWERSTRIP_UI.SetConfig" >/dev/null
+            echo "LEDs on ${host}: mode set to ${mode}"
+            ;;
+        status|get)
+            local response
+            response=$(curl -sf -m 10 --digest -u "${user}:${pass}" \
+                "http://${host}/rpc/POWERSTRIP_UI.GetConfig")
+            echo "$response" | jq -r '"LEDs on '"${host}"': mode=\(.leds.mode)"'
+            ;;
+    esac
+}
+
+if [[ "$socket" == "led" ]]; then
+    run_led
+elif [[ "$socket" == "all" ]]; then
     for id in 0 1 2 3; do
         run_one "$id"
     done
