@@ -22,11 +22,39 @@ Four graphs, installed from a single plugin file via symlinks:
 |---|---|---|
 | Socket 0-3 (V) | line | Mains voltage measured at each socket |
 
-### shelly_energy — per-socket cumulative energy
+### shelly_energy — per-socket energy consumption
 
 | Data series | Draw | Description |
 |---|---|---|
-| Socket 0-3 (Wh) | line | Energy drawn since last device boot/reset — resets to 0 on reboot, producing a sawtooth |
+| Socket 0-3 (Wh per hour) | stacked area, plus a `Total` line | Energy consumed by each socket, derived by RRD from the device's cumulative counter |
+
+The device exposes energy as `aenergy.total`, a counter that only ever
+grows (and resets to 0 on reboot). Graphing that directly gives an
+ever-rising ramp with a sawtooth, which says nothing about actual usage,
+so the plugin reports the counter as-is and declares the fields as
+`type DERIVE` with `min 0`: RRD differentiates the counter and
+`graph_period hour` renders the result as Wh per hour.
+
+Two consequences worth knowing:
+
+- `min 0` makes the negative delta of a reboot reset fall out of range,
+  so RRD stores it as *unknown* — a small gap in the graph instead of a
+  spike. (`COUNTER` would misread the same drop as a 64-bit wraparound
+  and invent an enormous value; `DERIVE` is the correct type here.)
+- Wh per hour is dimensionally identical to the watts in
+  `shelly_power`, so the two graphs track each other. The data differs
+  in quality, though: `apower` is a single instantaneous sample per
+  poll, while the derived counter is the device's own integration over
+  the entire interval, so a kettle that runs for 40 seconds shows up
+  here and is usually invisible in the power graph.
+
+What this graph still cannot do is answer "how many kWh did I use
+yesterday" — it is a rate, and RRD rescales it to each graph's own
+consolidation (5 min on the day graph, 2 h on the month graph, 1 day on
+the year graph). Munin's legend reports Cur/Min/Avg/Max but no integral
+(rrdtool's `VDEF ... TOTAL` would, but Munin does not expose VDEFs), so
+a true per-day/per-month kWh figure means reading Avg off the legend and
+multiplying by the window by hand.
 
 ### shelly_wifi — Wi-Fi signal strength
 
@@ -151,6 +179,25 @@ against `_europower2` for the second device.)
 
 `munin-node-configure --suggest` will also list the plugin as available
 once credentials are in place.
+
+### Migrating an existing install
+
+RRD fixes a data source's type when the file is created, and Munin will
+not change it afterwards. An install that already graphed the old
+cumulative `shelly_energy` therefore keeps writing `GAUGE` files, and the
+new `DERIVE` declaration has no effect until the RRDs are converted:
+
+```sh
+# per socket, per device; the DS name in Munin's RRDs is always "42"
+rrdtool tune /var/lib/munin/<group>/<host>-shelly_energy-socket0-g.rrd -d 42:DERIVE
+```
+
+Or simply move the old `shelly_energy-*` `.rrd` files aside and let Munin
+recreate them on the next run. Either way the stored history is lost — it
+was a counter ramp, not consumption, so there is little to preserve.
+
+The `shelly_power`, `shelly_voltage` and `shelly_wifi` graphs are
+unaffected and need no migration.
 
 ## Developer reference
 

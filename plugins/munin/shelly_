@@ -22,9 +22,11 @@
 #
 #   shelly_power   — per-socket power draw (W), via Switch.GetStatus
 #   shelly_voltage — per-socket mains voltage (V), via Switch.GetStatus
-#   shelly_energy  — per-socket cumulative energy (Wh) since last boot/
-#                    reset, via Switch.GetStatus (aenergy.total) — resets
-#                    to 0 on a device reboot, so expect sawtooth drops
+#   shelly_energy  — per-socket energy consumption (Wh per hour), via
+#                    Switch.GetStatus (aenergy.total): the plugin reports
+#                    the device's cumulative counter as-is and lets RRD
+#                    differentiate it (type DERIVE), so the graph shows
+#                    consumption per hour instead of an ever-growing ramp
 #   shelly_wifi    — Wi-Fi signal strength (RSSI, dBm), via Shelly.GetStatus
 #
 # Authentication is HTTP Digest (SHA-256), shelled out to curl rather than
@@ -114,17 +116,21 @@ if (@ARGV && $ARGV[0] eq 'config') {
             print "socket${id}.info Mains voltage measured at socket $id.\n";
         }
     } elsif ($graph_type eq 'energy') {
-        print "graph_title Shelly Energy ($host)\n";
+        print "graph_title Shelly Energy Consumption ($host)\n";
         print "graph_args --base 1000 --lower-limit 0\n";
-        print "graph_vlabel Watt-hours\n";
+        print "graph_vlabel Wh / \${graph_period}\n";
+        print "graph_period hour\n";
         print "graph_category sensors\n";
-        print "graph_info Per-socket cumulative energy since last device boot/reset. Drops to 0 on reboot.\n";
+        print "graph_info Per-socket energy consumption, derived by RRD from the device's cumulative energy counter (aenergy.total). Wh per hour is numerically the same quantity as the power graph, but integrated by the device over the whole poll interval rather than sampled once, so short loads are not missed. A counter reset on reboot produces a negative delta, which min 0 turns into a gap instead of a spike.\n";
+        print "graph_order " . join(' ', map { "socket$_" } @sockets) . "\n";
         for my $id (@sockets) {
             print "socket${id}.label Socket $id\n";
-            print "socket${id}.draw LINE2\n";
+            print "socket${id}.type DERIVE\n";
             print "socket${id}.min 0\n";
-            print "socket${id}.info Cumulative energy drawn by socket $id since last boot/reset.\n";
+            print "socket${id}.draw AREASTACK\n";
+            print "socket${id}.info Energy consumed by socket $id per hour.\n";
         }
+        print "graph_total Total\n";
     } elsif ($graph_type eq 'wifi') {
         print "graph_title Shelly Wi-Fi Signal ($host)\n";
         print "graph_args --base 1000 --lower-limit -100 --upper-limit 0\n";

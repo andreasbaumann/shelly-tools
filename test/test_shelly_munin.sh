@@ -38,6 +38,13 @@ for g in power voltage energy wifi; do
 	assert_contains "$g config declares a graph_category" "$out" "graph_category"
 done
 
+# the energy graph reports the device's cumulative counter and leaves the
+# differentiation to RRD, so the DERIVE declaration is the contract here
+out=$("$WORKDIR/shelly_energy_${instance}" config 2>&1)
+assert_contains "energy config declares socket0 as DERIVE" "$out" "socket0.type DERIVE"
+assert_contains "energy config clamps socket0 at min 0" "$out" "socket0.min 0"
+assert_contains "energy config renders per hour" "$out" "graph_period hour"
+
 out=$("$WORKDIR/shelly_power_${instance}" 2>&1); code=$?
 assert_exit "power fetch exits 0" 0 "$code"
 for s in 0 1 2 3; do
