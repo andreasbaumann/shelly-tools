@@ -43,6 +43,11 @@ done
 out=$("$WORKDIR/shelly_energy_${instance}" config 2>&1)
 assert_contains "energy config declares socket0 as DERIVE" "$out" "socket0.type DERIVE"
 assert_contains "energy config clamps socket0 at min 0" "$out" "socket0.min 0"
+# DERIVE only accepts integers, so the counter is reported in mWh and scaled
+# back to Wh at graph time; without the cdef the graph would read 1000x high
+assert_contains "energy config scales mWh back to Wh" "$out" "socket0.cdef socket0,1000,/"
+# in DS units (mWh/s), so ~4320 W: clamps a bogus delta to unknown, not a spike
+assert_contains "energy config caps socket0 at max 1200" "$out" "socket0.max 1200"
 assert_contains "energy config renders per hour" "$out" "graph_period hour"
 
 out=$("$WORKDIR/shelly_power_${instance}" 2>&1); code=$?

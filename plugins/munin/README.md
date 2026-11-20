@@ -31,16 +31,32 @@ Four graphs, installed from a single plugin file via symlinks:
 The device exposes energy as `aenergy.total`, a counter that only ever
 grows (and resets to 0 on reboot). Graphing that directly gives an
 ever-rising ramp with a sawtooth, which says nothing about actual usage,
-so the plugin reports the counter as-is and declares the fields as
+so the plugin reports the counter itself and declares the fields as
 `type DERIVE` with `min 0`: RRD differentiates the counter and
 `graph_period hour` renders the result as Wh per hour.
 
-Two consequences worth knowing:
+One implementation detail this forces: RRD accepts only integers for
+`DERIVE` (and `COUNTER`/`ABSOLUTE`) — a fractional value is rejected
+outright with `not a simple signed integer`, and the update is dropped,
+leaving the graph empty. `aenergy.total` is fractional Wh, so the plugin
+reports it in **milliwatt-hours** as an integer and scales it back with
+`socketN.cdef socketN,1000,/`. Rounding to whole Wh instead would work
+but would quantise a standby socket (~0.2 Wh per 5-minute poll) into
+on/off steps; the division commutes with the per-hour scaling Munin
+applies, so the cdef costs nothing.
+
+Two further consequences worth knowing:
 
 - `min 0` makes the negative delta of a reboot reset fall out of range,
   so RRD stores it as *unknown* — a small gap in the graph instead of a
   spike. (`COUNTER` would misread the same drop as a 64-bit wraparound
   and invent an enormous value; `DERIVE` is the correct type here.)
+- `max 1200` does the same at the other end. Both bounds are in DS
+  units — mWh per second, *before* the cdef — so 1200 is ≈ 4320 W, well
+  above what a 16 A socket can draw and far below what a corrupt
+  reading or a change of counter units would fabricate. Without it any
+  such delta lands as a single enormous spike that owns the autoscale
+  of the day and week graphs until it ages out.
 - Wh per hour is dimensionally identical to the watts in
   `shelly_power`, so the two graphs track each other. The data differs
   in quality, though: `apower` is a single instantaneous sample per
@@ -193,11 +209,24 @@ rrdtool tune /var/lib/munin/<group>/<host>-shelly_energy-socket0-g.rrd -d 42:DER
 ```
 
 Or simply move the old `shelly_energy-*` `.rrd` files aside and let Munin
-recreate them on the next run. Either way the stored history is lost — it
+recreate them on the next run — which is the better option, because RRD
+pins `min`/`max` at creation too, so a tuned-in-place file keeps
+`max = NaN` unless you also `rrdtool tune <file> -a 42:1200`. Moving the
+file aside gets every bound right from birth. Note also that a file
+whose `last_ds` was recorded on a different scale (plain Wh, from before
+the mWh change) will compute one garbage delta on its first good update;
+recreating avoids that, `max` merely contains it. Either way the stored history is lost — it
 was a counter ramp, not consumption, so there is little to preserve.
 
 The `shelly_power`, `shelly_voltage` and `shelly_wifi` graphs are
 unaffected and need no migration.
+
+Munin encodes the DS type in the RRD filename, so a correctly created
+energy RRD ends in `-d.rrd` (`DERIVE`), not `-g.rrd` (`GAUGE`). If
+`-g.rrd` energy files are still being written, the migration above has
+not taken effect. Conversely, `-d.rrd` files that hold nothing but
+`nan` point at the integer problem above — check
+`/var/log/munin/munin-update.log` for `not a simple signed integer`.
 
 ## Developer reference
 

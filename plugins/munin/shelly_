@@ -24,9 +24,10 @@
 #   shelly_voltage — per-socket mains voltage (V), via Switch.GetStatus
 #   shelly_energy  — per-socket energy consumption (Wh per hour), via
 #                    Switch.GetStatus (aenergy.total): the plugin reports
-#                    the device's cumulative counter as-is and lets RRD
-#                    differentiate it (type DERIVE), so the graph shows
-#                    consumption per hour instead of an ever-growing ramp
+#                    the device's cumulative counter (in mWh, since RRD
+#                    only accepts integers for DERIVE) and lets RRD
+#                    differentiate it, so the graph shows consumption per
+#                    hour instead of an ever-growing ramp
 #   shelly_wifi    — Wi-Fi signal strength (RSSI, dBm), via Shelly.GetStatus
 #
 # Authentication is HTTP Digest (SHA-256), shelled out to curl rather than
@@ -121,12 +122,18 @@ if (@ARGV && $ARGV[0] eq 'config') {
         print "graph_vlabel Wh / \${graph_period}\n";
         print "graph_period hour\n";
         print "graph_category sensors\n";
-        print "graph_info Per-socket energy consumption, derived by RRD from the device's cumulative energy counter (aenergy.total). Wh per hour is numerically the same quantity as the power graph, but integrated by the device over the whole poll interval rather than sampled once, so short loads are not missed. A counter reset on reboot produces a negative delta, which min 0 turns into a gap instead of a spike.\n";
+        print "graph_info Per-socket energy consumption, derived by RRD from the device's cumulative energy counter (aenergy.total). Wh per hour is numerically the same quantity as the power graph, but integrated by the device over the whole poll interval rather than sampled once, so short loads are not missed. A counter reset on reboot produces a negative delta, which min 0 turns into a gap instead of a spike; max 1200 (mWh/s, ~4320 W) does the same for an implausibly large one. The counter is reported in milliwatt-hours because RRD only accepts integers for DERIVE, and scaled back to Wh by a cdef.\n";
         print "graph_order " . join(' ', map { "socket$_" } @sockets) . "\n";
         for my $id (@sockets) {
             print "socket${id}.label Socket $id\n";
             print "socket${id}.type DERIVE\n";
             print "socket${id}.min 0\n";
+            # min/max are in DS units, i.e. mWh per second, before the
+            # cdef below: 1200 mWh/s is ~4320 W, well above what a 16 A
+            # socket can draw, so only a bogus delta (counter reset, a
+            # unit change, a corrupt reading) is clamped away as unknown.
+            print "socket${id}.max 1200\n";
+            print "socket${id}.cdef socket${id},1000,/\n";
             print "socket${id}.draw AREASTACK\n";
             print "socket${id}.info Energy consumed by socket $id per hour.\n";
         }
@@ -170,7 +177,9 @@ if ($graph_type eq 'wifi') {
         if ($graph_type eq 'voltage') {
             printf "socket%s.value %.1f\n", $id, $status->{voltage};
         } elsif ($graph_type eq 'energy') {
-            printf "socket%s.value %.3f\n", $id, $status->{aenergy}{total};
+            # RRD rejects non-integer values for DERIVE, so report the
+            # counter in mWh and let the cdef in config scale it back to Wh.
+            printf "socket%s.value %d\n", $id, int($status->{aenergy}{total} * 1000 + 0.5);
         } else {
             printf "socket%s.value %.1f\n", $id, $status->{apower};
         }
